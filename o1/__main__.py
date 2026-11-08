@@ -14,6 +14,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         migrate_every=args.migrate_every,
         stall_patience=args.stall_patience,
         policy_trial_len=args.policy_trial_len,
+        tip_gate_slack=args.tip_gate_slack,
+        tip_streak_guarantee=args.tip_streak_guarantee,
+        policy_admit_slack=args.policy_admit_slack,
         out_dir=args.out,
     )
     result = run_o1(cfg)
@@ -27,6 +30,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "tip_sealed": result.tip_sealed,
                 "candidates": result.candidates,
                 "policy_trials": result.policy_trials,
+                "policy_soft_admits": result.policy_soft_admits,
+                "tip_streak_admits": result.tip_streak_admits,
                 "migrations": result.migrations,
                 "out_dir": result.out_dir,
                 "budget": result.budget,
@@ -56,6 +61,9 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--migrate-every", type=int, default=20)
     run_p.add_argument("--stall-patience", type=int, default=12)
     run_p.add_argument("--policy-trial-len", type=int, default=10)
+    run_p.add_argument("--tip-gate-slack", type=float, default=0.02)
+    run_p.add_argument("--tip-streak-guarantee", type=int, default=3)
+    run_p.add_argument("--policy-admit-slack", type=float, default=0.01)
     run_p.add_argument("--out", type=str, default="runs/o1_demo")
     run_p.set_defaults(func=cmd_run)
 

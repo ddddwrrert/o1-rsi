@@ -50,10 +50,16 @@ Bootstrap 三岛不同菜单
 → sealed 报表（不回流）
 ```
 
+## 防假阴性（有用改进别被门杀光）
+
+1. **tip \(k\)-连升保底**（`tip_streak_guarantee=3`）：public 连续超过 tip 却被 gate 拒满 \(k\) 次 → 强制录取 streak 中 public 最好的那个（`reason=streak_guarantee_k*`）
+2. **菜单软录取**（`policy_admit_slack=0.01`）：Temp 结束时岛 best **不显著差于**试用起点即可 Admit（`mode=non_worse`）；显著变差才 Rollback
+3. 被拒 tip 候选仍留在岛种群，搜索不停
+
 ## 不变式
 
 1. 分数只来自 `OfficialJudge`
 2. `meta=0`（不花票现场造新 provider）
 3. Bandit 调权 ≠ 搜法转正；只有 IslandPolicy 试用走编制
 4. 臂统计按岛分立，不全局糊成一锅
-5. tip 更新需 public 提升且 gate 不明显变差
+5. tip：默认 public↑ 且 gate 不太掉；另有 streak 保底防全拒

@@ -27,6 +27,12 @@ class O1Config:
     ucb_c: float = 1.414
     # island ticket weights (renormalized); weak islands keep a floor via sharing
     island_weight_floor: float = 0.15
+    # tip: gate may drop at most this much vs incumbent
+    tip_gate_slack: float = 0.02
+    # tip: after this many consecutive public-beats-tip rejected by gate, force-admit best of streak
+    tip_streak_guarantee: int = 3
+    # menu Temp: admit if island best is not worse than start by more than this
+    policy_admit_slack: float = 0.01
 
 
 @dataclass
@@ -37,6 +43,8 @@ class O1Result:
     tip_sealed: float
     candidates: int
     policy_trials: int
+    policy_soft_admits: int
+    tip_streak_admits: int
     migrations: int
     out_dir: str
     budget: dict[str, Any]
@@ -107,35 +115,27 @@ def run_o1(cfg: O1Config, task: DemoTask | None = None) -> O1Result:
     backups = backup_menus()
     trial: _Trial | None = None
     policy_trials = 0
+    policy_soft_admits = 0
+    tip_streak_admits = 0
     migrations = 0
     steps = 0
 
     tip_gate = _gate_score(task, tip)
+    public_streak = 0
+    streak_best: Program | None = None
+    streak_best_pub = float("-inf")
+    streak_best_gate = float("-inf")
 
-    def consider_tip(prog: Program, account: str) -> None:
-        nonlocal tip, tip_public, tip_gate
-        pub = _public_score(task, prog)
-        if pub <= tip_public:
-            return
-        # thin admit: public up and gate not clearly worse (no extra ticket;
-        # gate mean is free relative to the already-charged child eval in this toy)
-        gate = _gate_score(task, prog)
-        if gate + 1e-12 < tip_gate - 0.02:
-            store.log(
-                {
-                    "phase": "tip_reject_gate",
-                    "version": prog.version,
-                    "public": pub,
-                    "gate": gate,
-                    "tip_gate": tip_gate,
-                    "account": account,
-                }
-            )
-            return
+    def _install_tip(prog: Program, pub: float, gate: float, account: str, reason: str) -> None:
+        nonlocal tip, tip_public, tip_gate, public_streak, streak_best, streak_best_pub, streak_best_gate
         tip = prog
         tip_public = pub
         tip_gate = gate
-        store.save_tip(tip, {"public": tip_public, "gate": tip_gate, "account": account})
+        public_streak = 0
+        streak_best = None
+        streak_best_pub = float("-inf")
+        streak_best_gate = float("-inf")
+        store.save_tip(tip, {"public": tip_public, "gate": tip_gate, "account": account, "reason": reason})
         store.log(
             {
                 "phase": "tip_update",
@@ -143,8 +143,57 @@ def run_o1(cfg: O1Config, task: DemoTask | None = None) -> O1Result:
                 "public": tip_public,
                 "gate": tip_gate,
                 "account": account,
+                "reason": reason,
             }
         )
+
+    def consider_tip(prog: Program, account: str) -> None:
+        nonlocal tip, tip_public, tip_gate, public_streak, streak_best, streak_best_pub, streak_best_gate
+        nonlocal tip_streak_admits
+        pub = _public_score(task, prog)
+        if pub <= tip_public:
+            public_streak = 0
+            streak_best = None
+            streak_best_pub = float("-inf")
+            streak_best_gate = float("-inf")
+            return
+        # thin admit: public up and gate not clearly worse
+        gate = _gate_score(task, prog)
+        if gate + 1e-12 >= tip_gate - cfg.tip_gate_slack:
+            _install_tip(prog, pub, gate, account, reason="public_up_gate_ok")
+            return
+
+        # gate blocked a public improvement — count streak / keep best
+        public_streak += 1
+        if pub > streak_best_pub:
+            streak_best = prog
+            streak_best_pub = pub
+            streak_best_gate = gate
+        store.log(
+            {
+                "phase": "tip_reject_gate",
+                "version": prog.version,
+                "public": pub,
+                "gate": gate,
+                "tip_gate": tip_gate,
+                "account": account,
+                "streak": public_streak,
+                "streak_need": cfg.tip_streak_guarantee,
+            }
+        )
+        if (
+            cfg.tip_streak_guarantee > 0
+            and public_streak >= cfg.tip_streak_guarantee
+            and streak_best is not None
+        ):
+            tip_streak_admits += 1
+            _install_tip(
+                streak_best,
+                streak_best_pub,
+                streak_best_gate,
+                account,
+                reason=f"streak_guarantee_k{cfg.tip_streak_guarantee}",
+            )
 
     while budget.remaining_total() > 0:
         # pick island proportional to recent best (with floor)
@@ -235,8 +284,12 @@ def run_o1(cfg: O1Config, task: DemoTask | None = None) -> O1Result:
         if trial and trial.island_id == island_id:
             trial.remaining -= 1
             if trial.remaining <= 0:
-                # admit if island best improved vs trial start
-                if island.best_fitness > trial.start_best + 1e-12:
+                # admit if not significantly worse than trial start (soft), else rollback
+                floor = trial.start_best - cfg.policy_admit_slack
+                if island.best_fitness + 1e-12 >= floor:
+                    improved = island.best_fitness > trial.start_best + 1e-12
+                    if not improved:
+                        policy_soft_admits += 1
                     island.policy = IslandPolicy(
                         island_id=trial.new_policy.island_id,
                         arm_menu=trial.new_policy.arm_menu,
@@ -254,6 +307,9 @@ def run_o1(cfg: O1Config, task: DemoTask | None = None) -> O1Result:
                             "from": trial.old_policy.version,
                             "to": island.policy.version,
                             "best": island.best_fitness,
+                            "start_best": trial.start_best,
+                            "slack": cfg.policy_admit_slack,
+                            "mode": "improve" if improved else "non_worse",
                         }
                     )
                 else:
@@ -265,6 +321,7 @@ def run_o1(cfg: O1Config, task: DemoTask | None = None) -> O1Result:
                             "restored": trial.old_policy.version,
                             "best": island.best_fitness,
                             "start_best": trial.start_best,
+                            "slack": cfg.policy_admit_slack,
                         }
                     )
                 island.ensure_arm_stats()
@@ -371,7 +428,14 @@ def run_o1(cfg: O1Config, task: DemoTask | None = None) -> O1Result:
         "tip_sealed": sealed,
         "candidates": cand_i,
         "policy_trials": policy_trials,
+        "policy_soft_admits": policy_soft_admits,
+        "tip_streak_admits": tip_streak_admits,
         "migrations": migrations,
+        "guards": {
+            "tip_gate_slack": cfg.tip_gate_slack,
+            "tip_streak_guarantee": cfg.tip_streak_guarantee,
+            "policy_admit_slack": cfg.policy_admit_slack,
+        },
         "budget": budget.snapshot(),
         "islands": {i: _snapshot_island(s) for i, s in islands.items()},
     }
@@ -386,6 +450,8 @@ def run_o1(cfg: O1Config, task: DemoTask | None = None) -> O1Result:
         tip_sealed=float(sealed) if sealed is not None else float("nan"),
         candidates=cand_i,
         policy_trials=policy_trials,
+        policy_soft_admits=policy_soft_admits,
+        tip_streak_admits=tip_streak_admits,
         migrations=migrations,
         out_dir=str(Path(cfg.out_dir)),
         budget=budget.snapshot(),

@@ -13,4 +13,6 @@
 | 累积 | 岛种群 + 臂统计 + 策略版本谱系 + tip |
 | 冻面 | 官方 \(V\)；总 \(B\)；`evaluate` 语义；`meta=0`；sealed 不回流 |
 
-实现：`o1_rsi/`（`python -m o1 run`）。
+**防假阴性：** tip 连续 public 超 tip 却被 gate 拒满 \(k\) 次 → streak 保底晋级；菜单 Temp 在 `policy_admit_slack` 内不显著变差可软 Admit。
+
+实现：本仓库（`python -m o1 run`）。
